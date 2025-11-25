@@ -1,211 +1,125 @@
-# -*- coding: utf-8 -*-
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Star, register
-from astrbot.api import logger
-import astrbot.api.message_components as Comp
+# what_to_eat/main.py
 import random
+import time
 import json
 import os
-import requests
-import time
+import aiohttp
+from astrbot.core import PluginBase
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data.json")
-
-DEFAULT_CONFIG = {
-    "shit_probability": 0.1,
-    "shit_image_url": "https://img.zcool.cn/community/01d9065e9c8b17a80121651829c3a8.jpg@1280w_1l_2o_100sh.jpg",
-    "cooldown_seconds": 60
-}
-
-DEFAULT_DATA = {
-    "last_used": {}
-}
-
-class WhatToEat(Star):
+class WhatToEatPlugin(PluginBase):
     def __init__(self, context):
         super().__init__(context)
         self.context = context
-        self.config = self.load_config()
-        self.data = self.load_data()
+        self.data_file = os.path.join(context.plugin_data_path, "data.json")
+        self.foods = []
+        self.load_data()
+        self.context.loop.create_task(self.fetch_foods())
 
-    def load_config(self):
-        if not os.path.exists(CONFIG_PATH):
-            logger.info("未找到配置文件，正在创建默认配置...")
-            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-                json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
-            return DEFAULT_CONFIG.copy()
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                if k not in config:
-                    config[k] = v
-            return config
-        except Exception as e:
-            logger.error(f"加载配置文件失败: {e}，使用默认配置。")
-            return DEFAULT_CONFIG.copy()
+    def register(self):
+        self.base_info = {
+            "name": "今天吃什么",
+            "version": "1.0.1",
+            "description": "随机推荐今天吃什么，有小概率吃屎。美食数据来自网络。",
+            "author": "YourName",
+            "repository": "https://github.com/yourname/what_to_eat"
+        }
+
+        self.register_message_handler(self.handle_message)
+        self.register_command("set_shit_prob", self.set_shit_prob, "设置吃屎概率（管理员）")
+        self.register_command("set_cooldown", self.set_cooldown, "设置冷却时间（管理员）")
+        self.register_command("refresh_foods", self.refresh_foods, "刷新美食列表（管理员）")
 
     def load_data(self):
-        if not os.path.exists(DATA_PATH):
-            with open(DATA_PATH, 'w', encoding='utf-8') as f:
-                json.dump(DEFAULT_DATA, f, ensure_ascii=False, indent=2)
-            return DEFAULT_DATA.copy()
-        try:
-            with open(DATA_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"加载数据文件失败: {e}，使用默认数据。")
-            return DEFAULT_DATA.copy()
+        if os.path.exists(self.data_file):
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+        else:
+            self.data = {
+                "last_used": {},
+                "shit_prob": 0.1,
+                "cooldown": 3600
+            }
 
     def save_data(self):
+        with open(self.data_file, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    async def fetch_foods(self):
+        url = "https://api.npoint.io/8164f16271253edb851a"
         try:
-            with open(DATA_PATH, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if 'foods' in data and isinstance(data['foods'], list):
+                            self.foods = [food.strip() for food in data['foods'] if food.strip()]
+                            return True
         except Exception as e:
-            logger.error(f"保存数据文件失败: {e}")
+            self.context.logger.error(f"获取美食列表失败: {e}")
+        return False
 
-    def is_admin(self, user_id: str) -> bool:
-        admin_ids = self.context.config.get("admin_ids", [])
-        return user_id in admin_ids
+    async def refresh_foods(self, params, context):
+        if context.user_id not in self.context.admin_ids:
+            return "权限不足。"
+        if await self.fetch_foods():
+            return "美食列表刷新成功！"
+        else:
+            return "美食列表刷新失败，请查看日志。"
 
-    def get_user_cooldown_left(self, user_id: str) -> int:
-        last = self.data["last_used"].get(user_id, 0)
-        now = time.time()
-        left = int(self.config["cooldown_seconds"] - (now - last))
-        return max(0, left)
+    async def handle_message(self, context):
+        message = context.message.strip()
+        if message != "今天吃什么":
+            return
 
-    def update_user_used(self, user_id: str):
-        self.data["last_used"][user_id] = time.time()
+        user_id = context.user_id
+        user_name = context.user_name
+        current_time = time.time()
+
+        if user_id in self.data["last_used"]:
+            elapsed = current_time - self.data["last_used"][user_id]
+            if elapsed < self.data["cooldown"]:
+                remain = int(self.data["cooldown"] - elapsed)
+                return f"今天你已经吃过了，在等{remain}秒后再吃。"
+
+        foods_to_use = self.foods or ["火锅", "烧烤", "寿司", "披萨", "汉堡", "拉面", "炸鸡", "沙拉", "牛排", "饺子"]
+
+        if random.random() < self.data["shit_prob"]:
+            food = "屎"
+            reply = f"{user_name}，你今天吃{food}！今天吃屎去吧。"
+        else:
+            food = random.choice(foods_to_use)
+            reply = f"{user_name}，你今天吃{food}。"
+
+        self.data["last_used"][user_id] = current_time
         self.save_data()
 
-    @filter.command("今天吃什么")
-    async def what_to_eat(self, event: AstrMessageEvent):
-        user_id = str(event.get_sender_id())
-        group_id = event.get_group_id()
-        is_group = group_id is not None
+        return reply
 
-        left_time = self.get_user_cooldown_left(user_id)
-        if left_time > 0:
-            m, s = divmod(left_time, 60)
-            time_str = f"{m}分{s}秒" if m > 0 else f"{s}秒"
-            yield event.plain_result(f"你刚吃过，{time_str}后再来问吧。")
-            return
-
+    async def set_shit_prob(self, params, context):
+        if context.user_id not in self.context.admin_ids:
+            return "权限不足。"
         try:
-            if event.get_platform_name() == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                assert isinstance(event, AiocqhttpMessageEvent)
-                if is_group:
-                    member_info = await event.bot.api.call_action('get_group_member_info',
-                                                                  group_id=group_id, user_id=user_id)
-                    user_name = member_info.get("card", "") or member_info.get("nickname", user_id)
-                else:
-                    stranger_info = await event.bot.api.call_action('get_stranger_info', user_id=user_id)
-                    user_name = stranger_info.get("nick", user_id)
-            else:
-                user_name = user_id
-        except Exception as e:
-            logger.warning(f"获取用户昵称失败: {e}")
-            user_name = user_id
+            prob = float(params.get("message"))
+            if not (0 <= prob <= 1):
+                return "概率必须在0到1之间。"
+            self.data["shit_prob"] = prob
+            self.save_data()
+            return f"吃屎概率已设置为{prob:.2f}。"
+        except (ValueError, TypeError):
+            return "请输入有效的数字。"
 
-        avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
-
-        shit_prob = self.config.get("shit_probability", 0.1)
-        if random.random() < shit_prob:
-            chain = [
-                Comp.Image.fromURL(self.config["shit_image_url"]),
-                Comp.Plain(f"\n{user_name}，你今天吃"),
-                Comp.Image.fromURL(avatar_url),
-                Comp.Plain("💩")
-            ]
-            yield event.chain_result(chain)
-        else:
-            try:
-                response = requests.get("https://www.themealdb.com/api/json/v1/1/random.php", timeout=5)
-                data = response.json()
-                if data.get("meals"):
-                    food_name = data["meals"][0]["strMeal"]
-                else:
-                    raise Exception("API 返回空")
-            except Exception as e:
-                logger.warning(f"获取在线美食失败: {e}，使用本地备选")
-                local_foods = [
-                    "宫保鸡丁", "麻婆豆腐", "红烧肉", "糖醋里脊", "鱼香肉丝",
-                    "水煮牛肉", "回锅肉", "酸辣土豆丝", "番茄炒蛋", "清蒸鲈鱼",
-                    "北京烤鸭", "小笼包", "火锅", "螺蛳粉", "扬州炒饭"
-                ]
-                food_name = random.choice(local_foods)
-
-            chain = [
-                Comp.Image.fromURL(avatar_url),
-                Comp.Plain(f"\n{user_name}，你今天吃{food_name}。")
-            ]
-            yield event.chain_result(chain)
-
-        self.update_user_used(user_id)
-
-    @filter.command("设置吃屎概率")
-    async def set_shit_prob(self, event: AstrMessageEvent):
-        user_id = str(event.get_sender_id())
-        if not self.is_admin(user_id):
-            yield event.plain_result("权限不足，只有管理员可以修改概率。")
-            return
-
-        msg = event.get_message_str().strip()
-        parts = msg.split()
-        if len(parts) < 2:
-            yield event.plain_result("用法：设置吃屎概率 [0-1之间的数，例如 0.1]")
-            return
-
+    async def set_cooldown(self, params, context):
+        if context.user_id not in self.context.admin_ids:
+            return "权限不足。"
         try:
-            new_prob = float(parts[1])
-            if not (0 <= new_prob <= 1):
-                raise ValueError
-        except ValueError:
-            yield event.plain_result("请输入 0 到 1 之间的数字。")
-            return
+            cooldown = int(params.get("message"))
+            if cooldown < 0:
+                return "冷却时间不能为负数。"
+            self.data["cooldown"] = cooldown
+            self.save_data()
+            return f"冷却时间已设置为{cooldown}秒。"
+        except (ValueError, TypeError):
+            return "请输入有效的整数。"
 
-        self.config["shit_probability"] = new_prob
-        try:
-            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, ensure_ascii=False, indent=2)
-            yield event.plain_result(f"已将吃屎概率设置为 {new_prob:.2%}。")
-        except Exception as e:
-            yield event.plain_result(f"保存配置失败: {e}")
-
-    @filter.command("设置冷却")
-    async def set_cooldown(self, event: AstrMessageEvent):
-        user_id = str(event.get_sender_id())
-        if not self.is_admin(user_id):
-            yield event.plain_result("权限不足，只有管理员可以修改冷却时间。")
-            return
-
-        msg = event.get_message_str().strip()
-        parts = msg.split()
-        if len(parts) < 2:
-            yield event.plain_result("用法：设置冷却 [秒数，例如 60]")
-            return
-
-        try:
-            new_cd = int(parts[1])
-            if new_cd < 0:
-                raise ValueError
-        except ValueError:
-            yield event.plain_result("请输入一个有效的非负整数。")
-            return
-
-        self.config["cooldown_seconds"] = new_cd
-        try:
-            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, ensure_ascii=False, indent=2)
-            yield event.plain_result(f"已将‘今天吃什么’的冷却时间设置为 {new_cd} 秒。")
-        except Exception as e:
-            yield event.plain_result(f"保存配置失败: {e}")
-
-register(
-    name="what_to_eat",
-    description="随机推荐今天吃什么，有概率吃屎，带冷却和管理员配置",
-    version="1.4",
-    author="YourName"
-)(WhatToEat)
+def register_plugin(context):
+    return WhatToEatPlugin(context)
