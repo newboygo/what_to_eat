@@ -1,0 +1,23 @@
+{
+  "title": "今天吃什么插件配置",
+  "description": "配置吃屎概率和冷却时间。",
+  "type": "object",
+  "properties": {
+    "shit_prob": {
+      "title": "吃屎概率",
+      "description": "设置返回“屎”的概率（0.0 ~ 1.0）。",
+      "type": "number",
+      "default": 0.1,
+      "minimum": 0,
+      "maximum": 1
+    },
+    "cooldown": {
+      "title": "冷却时间",
+      "description": "用户再次使用命令前需要等待的秒数。",
+      "type": "integer",
+      "default": 3600,
+      "minimum": 0
+    }
+  },
+  "required": []
+}
